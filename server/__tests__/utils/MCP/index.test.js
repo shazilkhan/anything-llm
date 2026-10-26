@@ -334,3 +334,143 @@ describe("MCPCompatibilityLayer.returnMCPResult", () => {
     expect(MCPCompatibilityLayer.returnMCPResult(null)).toBe("null");
   });
 });
+
+describe("MCPCompatibilityLayer.toolFunctionName", () => {
+  // Function names accepted by native tool calling providers (OpenAI, Anthropic, etc.)
+  const PROVIDER_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+
+  it("keeps names that providers already accept unchanged", () => {
+    expect(
+      MCPCompatibilityLayer.toolFunctionName("docs", "read_documentation")
+    ).toBe("docs-read_documentation");
+    expect(
+      MCPCompatibilityLayer.toolFunctionName("github", "create-issue")
+    ).toBe("github-create-issue");
+  });
+
+  it("replaces characters providers reject in server and tool names", () => {
+    const names = [
+      MCPCompatibilityLayer.toolFunctionName(
+        "awslabs.aws-documentation-mcp-server",
+        "read_documentation"
+      ),
+      MCPCompatibilityLayer.toolFunctionName("docs", "docs.search"),
+      MCPCompatibilityLayer.toolFunctionName("docs", "admin/users/list"),
+    ];
+
+    for (const name of names) expect(name).toMatch(PROVIDER_NAME_PATTERN);
+    expect(names[0]).toMatch(
+      /^awslabs_aws-documentation-mcp-server-read_documentation_[0-9a-f]{8}$/
+    );
+    expect(names[1]).toMatch(/^docs-docs_search_[0-9a-f]{8}$/);
+    expect(names[2]).toMatch(/^docs-admin_users_list_[0-9a-f]{8}$/);
+  });
+
+  it("caps long names at 64 characters and keeps them distinct", () => {
+    const server = "awslabs.aws-documentation-mcp-server";
+    const first = MCPCompatibilityLayer.toolFunctionName(
+      server,
+      "recommend_related_documentation_pages"
+    );
+    const second = MCPCompatibilityLayer.toolFunctionName(
+      server,
+      "recommend_related_documentation_links"
+    );
+    const longButValidChars = MCPCompatibilityLayer.toolFunctionName(
+      "my-very-long-server-name-for-documentation",
+      "recommend_related_documentation"
+    );
+
+    for (const name of [first, second, longButValidChars]) {
+      expect(name).toMatch(PROVIDER_NAME_PATTERN);
+      expect(name).toHaveLength(64);
+    }
+    expect(first).not.toBe(second);
+  });
+
+  it("never gives two different tools the same name", () => {
+    const dotted = MCPCompatibilityLayer.toolFunctionName(
+      "docs",
+      "docs.search"
+    );
+    const slashed = MCPCompatibilityLayer.toolFunctionName(
+      "docs",
+      "docs/search"
+    );
+    const underscored = MCPCompatibilityLayer.toolFunctionName(
+      "docs",
+      "docs_search"
+    );
+
+    expect(new Set([dotted, slashed, underscored]).size).toBe(3);
+  });
+
+  it("returns the same name for the same tool every time", () => {
+    expect(MCPCompatibilityLayer.toolFunctionName("docs", "docs.search")).toBe(
+      MCPCompatibilityLayer.toolFunctionName("docs", "docs.search")
+    );
+  });
+});
+
+describe("MCPCompatibilityLayer.convertServerToolsToPlugins", () => {
+  const SERVER = "awslabs.aws-documentation-mcp-server";
+  let storageDir;
+  let mcpLayer;
+
+  beforeEach(() => {
+    storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-compat-"));
+    process.env.STORAGE_DIR = storageDir;
+    MCPCompatibilityLayer._instance = undefined;
+    MCPHypervisor._instance = undefined;
+    jest.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    MCPCompatibilityLayer._instance = undefined;
+    MCPHypervisor._instance = undefined;
+    mcpLayer = undefined;
+    delete process.env.STORAGE_DIR;
+    fs.rmSync(storageDir, { recursive: true, force: true });
+    jest.restoreAllMocks();
+  });
+
+  it("registers provider-safe function names but calls the server with the original tool name", async () => {
+    mcpLayer = new MCPCompatibilityLayer();
+    const callTool = jest.fn().mockResolvedValue({
+      content: [{ type: "text", text: "3 results" }],
+    });
+    mcpLayer.mcps = {
+      [SERVER]: {
+        listTools: () =>
+          Promise.resolve({
+            tools: [{ ...GOOD_TOOL, name: "docs.search" }],
+          }),
+        callTool,
+      },
+    };
+
+    const plugins = await mcpLayer.convertServerToolsToPlugins(SERVER);
+    const registered = [];
+    const aibitat = {
+      function: (definition) => registered.push(definition),
+      handlerProps: { log: () => {} },
+      introspect: () => {},
+    };
+    plugins.forEach((plugin) => plugin.plugin().setup(aibitat));
+
+    const expectedName = MCPCompatibilityLayer.toolFunctionName(
+      SERVER,
+      "docs.search"
+    );
+    expect(plugins.map((plugin) => plugin.name)).toEqual([expectedName]);
+    expect(registered.map((fn) => fn.name)).toEqual([expectedName]);
+    expect(expectedName).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+
+    const result = await registered[0].handler({ text: "lambda" });
+    expect(callTool).toHaveBeenCalledWith({
+      name: "docs.search",
+      arguments: { text: "lambda" },
+    });
+    expect(result).toBe("3 results");
+  });
+});

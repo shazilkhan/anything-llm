@@ -17,12 +17,20 @@ jest.mock("../../../utils/agentFlows", () => ({
   },
 }));
 jest.mock("../../../utils/MCP", () => {
-  return jest.fn().mockImplementation(() => ({
+  const MCPCompatibilityLayer = jest.fn().mockImplementation(() => ({
     activeMCPServers: jest.fn().mockResolvedValue([]),
   }));
+  MCPCompatibilityLayer.toolFunctionName = jest.fn(
+    (serverName, toolName) => `fn:${serverName}|${toolName}`
+  );
+  return MCPCompatibilityLayer;
 });
 
-const { WORKSPACE_AGENT } = require("../../../utils/agents/defaults");
+const MCPCompatibilityLayer = require("../../../utils/MCP");
+const {
+  WORKSPACE_AGENT,
+  resolveAgentSkill,
+} = require("../../../utils/agents/defaults");
 
 describe("WORKSPACE_AGENT.getDefinition", () => {
   beforeEach(() => {
@@ -138,5 +146,31 @@ describe("WORKSPACE_AGENT.getDefinition", () => {
       null,
       workspace.id
     );
+  });
+});
+
+describe("resolveAgentSkill", () => {
+  it("maps an MCP tool's UI id to the function name the loader registers", () => {
+    const serverName = "awslabs.aws-documentation-mcp-server";
+    const resolved = resolveAgentSkill(`${serverName}-docs.search`, {
+      serverName,
+    });
+
+    expect(MCPCompatibilityLayer.toolFunctionName).toHaveBeenCalledWith(
+      serverName,
+      "docs.search"
+    );
+    expect(resolved).toEqual({
+      loadable: [`@@mcp_${serverName}`],
+      registered: [`fn:${serverName}|docs.search`],
+    });
+  });
+
+  it("only strips the server name prefix when the server name has dashes", () => {
+    const resolved = resolveAgentSkill("aws-docs-search-pages", {
+      serverName: "aws-docs",
+    });
+
+    expect(resolved.registered).toEqual(["fn:aws-docs|search-pages"]);
   });
 });

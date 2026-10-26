@@ -1,8 +1,13 @@
+const crypto = require("crypto");
 const MCPHypervisor = require("./hypervisor");
 
 // JSON-RPC "Method not found". A server that does not implement `ping`
 // answers with this code, which still proves it is alive.
 const JSONRPC_METHOD_NOT_FOUND = -32601;
+
+// Function names that providers with native tool calling (OpenAI, Anthropic, etc.) accept.
+const MAX_FUNCTION_NAME_LENGTH = 64;
+const VALID_FUNCTION_NAME = /^[a-zA-Z0-9_-]{1,64}$/;
 
 /**
  * Check whether an MCP server client is reachable. A server that answers
@@ -79,16 +84,20 @@ class MCPCompatibilityLayer extends MCPHypervisor {
 
     const plugins = [];
     for (const tool of tools) {
+      const functionName = MCPCompatibilityLayer.toolFunctionName(
+        name,
+        tool.name
+      );
       plugins.push({
-        name: `${name}-${tool.name}`,
+        name: functionName,
         description: tool.description,
         plugin: function () {
           return {
-            name: `${name}-${tool.name}`,
+            name: functionName,
             setup: (aibitat) => {
               aibitat.function({
                 super: aibitat,
-                name: `${name}-${tool.name}`,
+                name: functionName,
                 controller: new AbortController(),
                 description: tool.description,
                 isMCPTool: true,
@@ -267,6 +276,32 @@ class MCPCompatibilityLayer extends MCPHypervisor {
     delete this.mcpLoadingResults[name];
     this.log(`MCP server was killed and removed from config file: ${name}`);
     return { success: true, error: null };
+  }
+
+  /**
+   * Build the agent function name for an MCP tool as `<server>-<tool>`.
+   * Native tool calling providers reject function names outside `^[a-zA-Z0-9_-]{1,64}$`,
+   * but server names come from the user's config (eg: `awslabs.aws-documentation-mcp-server`)
+   * and the MCP spec allows dots and slashes in tool names. Valid names are returned unchanged.
+   * Otherwise invalid characters become `_` and a short hash of the original name is appended
+   * (truncating if needed) so two different tools can never share a function name.
+   * @param {string} serverName - The MCP server name from the config file
+   * @param {string} toolName - The tool name reported by the MCP server
+   * @returns {string} The provider-safe function name
+   */
+  static toolFunctionName(serverName, toolName) {
+    const name = `${serverName}-${toolName}`;
+    if (VALID_FUNCTION_NAME.test(name)) return name;
+
+    const hash = crypto
+      .createHash("sha256")
+      .update(name)
+      .digest("hex")
+      .slice(0, 8);
+    const safeName = name
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
+      .slice(0, MAX_FUNCTION_NAME_LENGTH - hash.length - 1);
+    return `${safeName}_${hash}`;
   }
 
   /**

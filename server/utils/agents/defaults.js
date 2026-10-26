@@ -225,10 +225,21 @@ function resolveAgentSkill(skill = "", { serverName = null } = {}) {
     };
   }
 
-  // MCP server tool (`<server>-<tool>`): the Map key matches the UI id exactly.
+  // MCP server tool: the UI id is `<server>-<tool>`, but the tool is registered under
+  // its provider-safe function name, so map the id the same way the loader does.
   // Enabling reloads the server so the current suppression state is respected.
-  if (serverName)
-    return { loadable: [`@@mcp_${serverName}`], registered: [skill] };
+  if (serverName) {
+    const prefix = `${serverName}-`;
+    const toolName = skill.startsWith(prefix)
+      ? skill.slice(prefix.length)
+      : skill;
+    return {
+      loadable: [`@@mcp_${serverName}`],
+      registered: [
+        MCPCompatibilityLayer.toolFunctionName(serverName, toolName),
+      ],
+    };
+  }
 
   // Top-level built-in skill.
   const plugin = AgentPlugins[skill];
